@@ -70,7 +70,7 @@ namespace OpenUtau.Core {
             if (OS.IsWindows() && Preferences.Default.OnnxRunner == "CUDA") {
                 return new List<GpuInfo>{new GpuInfo {
                     deviceId = 0,
-                    description = "CUDA GPU 0 (NVIDIA)",
+                    description = "CUDA GPU 0",
                 }};
             }
             List<GpuInfo> gpuList = new List<GpuInfo>();
@@ -117,14 +117,7 @@ namespace OpenUtau.Core {
 
 #if WINDOWS
         private static SessionOptions getCudaSessionOptions() {
-            var cudaProviderOptions = new OrtCUDAProviderOptions();
-            cudaProviderOptions.UpdateOptions(new Dictionary<string, string> {
-                { "device_id", Math.Max(0, Preferences.Default.OnnxGpu).ToString() },
-                { "do_copy_in_default_stream", "1" },
-                { "cudnn_conv_algo_search", "DEFAULT" },
-                { "cudnn_conv_use_max_workspace", "1" },
-            });
-            return SessionOptions.MakeSessionOptionWithCudaProvider(cudaProviderOptions);
+            return SessionOptions.MakeSessionOptionWithCudaProvider(Math.Max(0, Preferences.Default.OnnxGpu));
         }
 #endif
 
