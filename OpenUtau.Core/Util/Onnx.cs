@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using OpenUtau.Core.Util;
 using Serilog;
@@ -24,6 +25,11 @@ namespace OpenUtau.Core {
 
     public class Onnx {
         private static readonly Dictionary<int, OrtEpDevice> devices = initializeDevices();
+#if WINDOWS
+        private static readonly object cudaDllLock = new object();
+        private static readonly List<IntPtr> loadedCudaLibraries = new List<IntPtr>();
+        private static bool cudaDllsPrepared = false;
+#endif
 
         private static Dictionary<int, OrtEpDevice> initializeDevices() {
             try {
@@ -128,6 +134,19 @@ namespace OpenUtau.Core {
         }
 
         private static void prepareCudaDllSearchPath() {
+            lock (cudaDllLock) {
+                if (cudaDllsPrepared) {
+                    return;
+                }
+
+                var candidates = getCudaDllSearchDirectories();
+                prependDllSearchDirectoriesToPath(candidates);
+                preloadCudaDlls(candidates);
+                cudaDllsPrepared = true;
+            }
+        }
+
+        private static List<string> getCudaDllSearchDirectories() {
             var candidates = new List<string>();
 
             void AddCandidate(string? path) {
@@ -135,14 +154,16 @@ namespace OpenUtau.Core {
                     return;
                 }
                 if (Directory.Exists(path)) {
-                    candidates.Add(path);
+                    candidates.Add(Path.GetFullPath(path));
                 }
                 var binPath = Path.Combine(path, "bin");
                 if (Directory.Exists(binPath)) {
-                    candidates.Add(binPath);
+                    candidates.Add(Path.GetFullPath(binPath));
                 }
             }
 
+            AddCandidate(AppContext.BaseDirectory);
+            AddCandidate(Path.Combine(AppContext.BaseDirectory, "runtimes", "win-x64", "native"));
             AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_4"));
             AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_3"));
             AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_2"));
@@ -158,11 +179,21 @@ namespace OpenUtau.Core {
                 AddCandidate(Path.Combine(programFiles, "NVIDIA GPU Computing Toolkit", "CUDA", cudaVersion));
             }
 
+            foreach (var pathEntry in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)) {
+                AddCandidate(pathEntry);
+            }
+
+            return candidates
+                .Where(Directory.Exists)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static void prependDllSearchDirectoriesToPath(List<string> candidates) {
             var pathEntries = (Environment.GetEnvironmentVariable("PATH") ?? "")
                 .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
             var knownPathEntries = new HashSet<string>(pathEntries, StringComparer.OrdinalIgnoreCase);
             var newPathEntries = candidates
-                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Where(path => !knownPathEntries.Contains(path))
                 .ToList();
 
@@ -170,24 +201,50 @@ namespace OpenUtau.Core {
                 Environment.SetEnvironmentVariable("PATH", string.Join(Path.PathSeparator, newPathEntries.Concat(pathEntries)));
                 Log.Information("Added CUDA DLL search paths: {CudaPaths}", string.Join(", ", newPathEntries));
             }
-
-            logDllAvailability("cudart64_12.dll");
-            logDllAvailability("cudnn64_9.dll");
         }
 
-        private static void logDllAvailability(string dllName) {
-            var dllPath = findDllOnPath(dllName);
-            if (dllPath == null) {
-                Log.Warning("{CudaDll} was not found on PATH. ONNX Runtime CUDA may fail to initialize and require CUDA 12.x/cuDNN 9.x runtime DLLs.", dllName);
-            } else {
-                Log.Information("Found {CudaDll} at {CudaDllPath}", dllName, dllPath);
+        private static void preloadCudaDlls(List<string> candidates) {
+            var cudaDlls = new[] {
+                "cudart64_12.dll",
+                "cublas64_12.dll",
+                "cublasLt64_12.dll",
+                "curand64_10.dll",
+                "cufft64_11.dll",
+                "cudnn64_9.dll",
+                "cudnn_ops64_9.dll",
+                "cudnn_cnn64_9.dll",
+                "cudnn_adv64_9.dll",
+                "cudnn_graph64_9.dll",
+                "cudnn_engines_precompiled64_9.dll",
+                "cudnn_engines_runtime_compiled64_9.dll",
+                "cudnn_heuristic64_9.dll",
+            };
+
+            foreach (var dllName in cudaDlls) {
+                preloadDllIfAvailable(dllName, candidates);
             }
         }
 
-        private static string? findDllOnPath(string dllName) {
-            foreach (var pathEntry in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)) {
+        private static void preloadDllIfAvailable(string dllName, List<string> candidates) {
+            var dllPath = findDll(dllName, candidates);
+            if (dllPath == null) {
+                Log.Warning("{CudaDll} was not found. ONNX Runtime CUDA may fail to initialize if this DLL is required.", dllName);
+                return;
+            }
+
+            try {
+                var handle = NativeLibrary.Load(dllPath);
+                loadedCudaLibraries.Add(handle);
+                Log.Information("Loaded {CudaDll} from {CudaDllPath}", dllName, dllPath);
+            } catch (Exception e) {
+                Log.Warning(e, "Failed to preload {CudaDll} from {CudaDllPath}", dllName, dllPath);
+            }
+        }
+
+        private static string? findDll(string dllName, List<string> candidates) {
+            foreach (var directory in candidates) {
                 try {
-                    var dllPath = Path.Combine(pathEntry, dllName);
+                    var dllPath = Path.Combine(directory, dllName);
                     if (File.Exists(dllPath)) {
                         return dllPath;
                     }
@@ -252,7 +309,7 @@ namespace OpenUtau.Core {
                 try {
                     return new InferenceSession(model, getOnnxSessionOptions());
                 } catch (Exception e) when (runner == "CUDA") {
-                    Log.Error(e, "Failed to create ONNX CUDA session. Install CUDA 12.x and cuDNN 9.x, ensure their bin directories are on PATH, then restart OpenUtau.");
+                    Log.Error(e, "Failed to create ONNX CUDA session. Install CUDA 12.x and cuDNN 9.x, ensure their bin directories are on PATH or copy the required DLLs next to OpenUtau.exe, then restart OpenUtau.");
                     throw;
                 } catch (Exception e) when (runner != "CPU") {
                     Log.Warning(e, "Failed to create ONNX session with {OnnxRunner}; falling back to CPU", runner);
@@ -278,7 +335,7 @@ namespace OpenUtau.Core {
                 try {
                     return new InferenceSession(modelPath, getOnnxSessionOptions());
                 } catch (Exception e) when (runner == "CUDA") {
-                    Log.Error(e, "Failed to create ONNX CUDA session. Install CUDA 12.x and cuDNN 9.x, ensure their bin directories are on PATH, then restart OpenUtau.");
+                    Log.Error(e, "Failed to create ONNX CUDA session. Install CUDA 12.x and cuDNN 9.x, ensure their bin directories are on PATH or copy the required DLLs next to OpenUtau.exe, then restart OpenUtau.");
                     throw;
                 } catch (Exception e) when (runner != "CPU") {
                     Log.Warning(e, "Failed to create ONNX session with {OnnxRunner}; falling back to CPU", runner);
