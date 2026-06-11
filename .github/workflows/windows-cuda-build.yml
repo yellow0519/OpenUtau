@@ -1,0 +1,110 @@
+name: Windows CUDA Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - 'OpenUtau/**'
+      - 'OpenUtau.Core/**'
+      - 'OpenUtau.Plugin.Builtin/**'
+      - 'OpenUtau.sln'
+      - '.github/workflows/windows-cuda-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-cuda:
+    name: Build Windows x64 CUDA package
+    runs-on: windows-2022
+
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: 'true'
+      CONFIGURATION: Release
+      RUNTIME_IDENTIFIER: win-x64
+      PUBLISH_DIR: ${{ github.workspace }}\artifacts\OpenUtau-win-x64-cuda
+      ZIP_PATH: ${{ github.workspace }}\artifacts\OpenUtau-win-x64-cuda.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Show .NET info
+        shell: pwsh
+        run: dotnet --info
+
+      - name: Restore Windows x64 dependencies
+        shell: pwsh
+        run: dotnet restore OpenUtau/OpenUtau.csproj -r $env:RUNTIME_IDENTIFIER
+
+      - name: Publish Windows x64 CUDA build
+        shell: pwsh
+        run: >-
+          dotnet publish OpenUtau/OpenUtau.csproj
+          -c $env:CONFIGURATION
+          -r $env:RUNTIME_IDENTIFIER
+          --self-contained true
+          --no-restore
+          -o "$env:PUBLISH_DIR"
+          /p:PublishSingleFile=false
+
+      - name: Copy built-in plugin to publish directory
+        shell: pwsh
+        run: |
+          $plugin = Get-ChildItem -Path "OpenUtau.Plugin.Builtin\bin\$env:CONFIGURATION" -Filter "OpenUtau.Plugin.Builtin.dll" -Recurse | Select-Object -First 1
+          if ($null -eq $plugin) {
+            Write-Warning "OpenUtau.Plugin.Builtin.dll was not found under OpenUtau.Plugin.Builtin\bin\$env:CONFIGURATION. The publish output may already contain it."
+          } else {
+            Copy-Item -Path $plugin.FullName -Destination $env:PUBLISH_DIR -Force
+            Write-Host "Copied $($plugin.FullName) to $env:PUBLISH_DIR"
+          }
+
+      - name: Check ONNX Runtime CUDA files
+        shell: pwsh
+        run: |
+          $expected = @(
+            "onnxruntime.dll",
+            "onnxruntime_providers_cuda.dll",
+            "onnxruntime_providers_shared.dll"
+          )
+
+          foreach ($file in $expected) {
+            $path = Join-Path $env:PUBLISH_DIR $file
+            if (Test-Path $path) {
+              Write-Host "Found $file"
+            } else {
+              Write-Warning "$file was not found in the publish directory. Build can still pass, but CUDA runtime loading may fail until this is resolved."
+            }
+          }
+
+          Get-ChildItem -Path $env:PUBLISH_DIR -File |
+            Sort-Object Name |
+            Select-Object Name, Length |
+            Format-Table -AutoSize
+
+      - name: Create zip package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path (Split-Path $env:ZIP_PATH) | Out-Null
+          if (Test-Path $env:ZIP_PATH) {
+            Remove-Item $env:ZIP_PATH -Force
+          }
+          Compress-Archive -Path "$env:PUBLISH_DIR\*" -DestinationPath $env:ZIP_PATH -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenUtau-win-x64-cuda
+          path: |
+            artifacts/OpenUtau-win-x64-cuda.zip
+            artifacts/OpenUtau-win-x64-cuda/
+          if-no-files-found: error
+          retention-days: 14
