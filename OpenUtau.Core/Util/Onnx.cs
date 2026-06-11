@@ -150,16 +150,47 @@ namespace OpenUtau.Core {
         private static List<string> getCudaDllSearchDirectories() {
             var candidates = new List<string>();
 
+            void AddDirectory(string? path) {
+                if (String.IsNullOrWhiteSpace(path)) {
+                    return;
+                }
+                try {
+                    if (Directory.Exists(path)) {
+                        candidates.Add(Path.GetFullPath(path));
+                    }
+                } catch {
+                    // Ignore malformed paths.
+                }
+            }
+
             void AddCandidate(string? path) {
                 if (String.IsNullOrWhiteSpace(path)) {
                     return;
                 }
-                if (Directory.Exists(path)) {
-                    candidates.Add(Path.GetFullPath(path));
+                AddDirectory(path);
+                AddDirectory(Path.Combine(path, "bin"));
+            }
+
+            void AddCudnnCandidate(string? path) {
+                if (String.IsNullOrWhiteSpace(path)) {
+                    return;
                 }
-                var binPath = Path.Combine(path, "bin");
-                if (Directory.Exists(binPath)) {
-                    candidates.Add(Path.GetFullPath(binPath));
+                AddCandidate(path);
+                try {
+                    var rootPath = Path.GetFullPath(path);
+                    var binPath = Path.Combine(rootPath, "bin");
+                    if (Directory.Exists(binPath)) {
+                        foreach (var directory in Directory.EnumerateDirectories(binPath, "*", SearchOption.AllDirectories)) {
+                            if (Directory.EnumerateFiles(directory, "cudnn*.dll", SearchOption.TopDirectoryOnly).Any()) {
+                                AddDirectory(directory);
+                            }
+                        }
+                    }
+                    if (Directory.EnumerateFiles(rootPath, "cudnn*.dll", SearchOption.TopDirectoryOnly).Any()) {
+                        AddDirectory(rootPath);
+                    }
+                } catch {
+                    // Ignore malformed or inaccessible cuDNN paths.
                 }
             }
 
@@ -171,17 +202,31 @@ namespace OpenUtau.Core {
             AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_1"));
             AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_0"));
             AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH"));
-            AddCandidate(Environment.GetEnvironmentVariable("CUDNN_PATH"));
-            AddCandidate(Environment.GetEnvironmentVariable("CUDNN_HOME"));
-            AddCandidate(Environment.GetEnvironmentVariable("CUDNN_ROOT"));
+            AddCudnnCandidate(Environment.GetEnvironmentVariable("CUDNN_PATH"));
+            AddCudnnCandidate(Environment.GetEnvironmentVariable("CUDNN_HOME"));
+            AddCudnnCandidate(Environment.GetEnvironmentVariable("CUDNN_ROOT"));
 
             var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
             foreach (var cudaVersion in new[] { "v12.4", "v12.3", "v12.2", "v12.1", "v12.0" }) {
                 AddCandidate(Path.Combine(programFiles, "NVIDIA GPU Computing Toolkit", "CUDA", cudaVersion));
             }
+            AddCudnnCandidate(Path.Combine(programFiles, "NVIDIA", "CUDNN"));
+            try {
+                var cudnnRoot = Path.Combine(programFiles, "NVIDIA", "CUDNN");
+                if (Directory.Exists(cudnnRoot)) {
+                    foreach (var cudnnVersionPath in Directory.EnumerateDirectories(cudnnRoot, "v*", SearchOption.TopDirectoryOnly)) {
+                        AddCudnnCandidate(cudnnVersionPath);
+                    }
+                }
+            } catch {
+                // Ignore malformed or inaccessible default cuDNN paths.
+            }
 
             foreach (var pathEntry in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)) {
                 AddCandidate(pathEntry);
+                if (pathEntry.Contains("CUDNN", StringComparison.OrdinalIgnoreCase)) {
+                    AddCudnnCandidate(pathEntry);
+                }
             }
 
             return candidates
