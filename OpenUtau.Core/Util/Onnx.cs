@@ -142,6 +142,7 @@ namespace OpenUtau.Core {
                 var candidates = getCudaDllSearchDirectories();
                 prependDllSearchDirectoriesToPath(candidates);
                 preloadCudaDlls(candidates);
+                preloadOrtProviderDlls(candidates);
                 cudaDllsPrepared = true;
             }
         }
@@ -222,6 +223,23 @@ namespace OpenUtau.Core {
 
             foreach (var dllName in cudaDlls) {
                 preloadDllIfAvailable(dllName, candidates);
+            }
+        }
+
+        private static void preloadOrtProviderDlls(List<string> candidates) {
+            foreach (var dllName in new[] { "onnxruntime_providers_shared.dll", "onnxruntime_providers_cuda.dll" }) {
+                var dllPath = findDll(dllName, candidates);
+                if (dllPath == null) {
+                    Log.Error("Required ONNX Runtime CUDA provider DLL {OrtProviderDll} was not found. Check the publish output and Microsoft.ML.OnnxRuntime.Gpu package native assets.", dllName);
+                    continue;
+                }
+                try {
+                    var handle = NativeLibrary.Load(dllPath);
+                    loadedCudaLibraries.Add(handle);
+                    Log.Information("Loaded ONNX Runtime provider DLL {OrtProviderDll} from {OrtProviderDllPath}", dllName, dllPath);
+                } catch (Exception e) {
+                    Log.Error(e, "Failed to preload ONNX Runtime provider DLL {OrtProviderDll} from {OrtProviderDllPath}", dllName, dllPath);
+                }
             }
         }
 
