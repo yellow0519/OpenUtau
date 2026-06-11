@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using Microsoft.ML.OnnxRuntime;
 using OpenUtau.Core.Util;
@@ -42,8 +43,8 @@ namespace OpenUtau.Core {
         public static List<string> getRunnerOptions() {
             if (OS.IsWindows()) {
                 return new List<string> {
-                "CPU",
-                "CUDA"
+                "CUDA",
+                "CPU"
                 };
             } else if (OS.IsMacOS()) {
                 return new List<string> {
@@ -67,7 +68,7 @@ namespace OpenUtau.Core {
                     deviceId = 0, // eliminate exception of taking OnnxGpuOptions[0]
                 }};
             }
-            if (OS.IsWindows() && Preferences.Default.OnnxRunner == "CUDA") {
+            if (OS.IsWindows() && getSelectedRunner() == "CUDA") {
                 return new List<GpuInfo>{new GpuInfo {
                     deviceId = 0,
                     description = "CUDA GPU 0",
@@ -106,6 +107,9 @@ namespace OpenUtau.Core {
         private static string getSelectedRunner() {
             List<string> runnerOptions = getRunnerOptions();
             string runner = Preferences.Default.OnnxRunner;
+            if (OS.IsWindows() && (String.IsNullOrEmpty(runner) || runner == "DirectML")) {
+                runner = "CUDA";
+            }
             if (String.IsNullOrEmpty(runner)) {
                 runner = runnerOptions[0];
             }
@@ -117,7 +121,81 @@ namespace OpenUtau.Core {
 
 #if WINDOWS
         private static SessionOptions getCudaSessionOptions() {
-            return SessionOptions.MakeSessionOptionWithCudaProvider(Math.Max(0, Preferences.Default.OnnxGpu));
+            prepareCudaDllSearchPath();
+            var deviceId = Math.Max(0, Preferences.Default.OnnxGpu);
+            Log.Information("Creating ONNX Runtime CUDA session on device {CudaDeviceId}", deviceId);
+            return SessionOptions.MakeSessionOptionWithCudaProvider(deviceId);
+        }
+
+        private static void prepareCudaDllSearchPath() {
+            var candidates = new List<string>();
+
+            void AddCandidate(string? path) {
+                if (String.IsNullOrWhiteSpace(path)) {
+                    return;
+                }
+                if (Directory.Exists(path)) {
+                    candidates.Add(path);
+                }
+                var binPath = Path.Combine(path, "bin");
+                if (Directory.Exists(binPath)) {
+                    candidates.Add(binPath);
+                }
+            }
+
+            AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_4"));
+            AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_3"));
+            AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_2"));
+            AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_1"));
+            AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH_V12_0"));
+            AddCandidate(Environment.GetEnvironmentVariable("CUDA_PATH"));
+            AddCandidate(Environment.GetEnvironmentVariable("CUDNN_PATH"));
+            AddCandidate(Environment.GetEnvironmentVariable("CUDNN_HOME"));
+            AddCandidate(Environment.GetEnvironmentVariable("CUDNN_ROOT"));
+
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            foreach (var cudaVersion in new[] { "v12.4", "v12.3", "v12.2", "v12.1", "v12.0" }) {
+                AddCandidate(Path.Combine(programFiles, "NVIDIA GPU Computing Toolkit", "CUDA", cudaVersion));
+            }
+
+            var pathEntries = (Environment.GetEnvironmentVariable("PATH") ?? "")
+                .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+            var knownPathEntries = new HashSet<string>(pathEntries, StringComparer.OrdinalIgnoreCase);
+            var newPathEntries = candidates
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(path => !knownPathEntries.Contains(path))
+                .ToList();
+
+            if (newPathEntries.Count > 0) {
+                Environment.SetEnvironmentVariable("PATH", string.Join(Path.PathSeparator, newPathEntries.Concat(pathEntries)));
+                Log.Information("Added CUDA DLL search paths: {CudaPaths}", string.Join(", ", newPathEntries));
+            }
+
+            logDllAvailability("cudart64_12.dll");
+            logDllAvailability("cudnn64_9.dll");
+        }
+
+        private static void logDllAvailability(string dllName) {
+            var dllPath = findDllOnPath(dllName);
+            if (dllPath == null) {
+                Log.Warning("{CudaDll} was not found on PATH. ONNX Runtime CUDA may fail to initialize and require CUDA 12.x/cuDNN 9.x runtime DLLs.", dllName);
+            } else {
+                Log.Information("Found {CudaDll} at {CudaDllPath}", dllName, dllPath);
+            }
+        }
+
+        private static string? findDllOnPath(string dllName) {
+            foreach (var pathEntry in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)) {
+                try {
+                    var dllPath = Path.Combine(pathEntry, dllName);
+                    if (File.Exists(dllPath)) {
+                        return dllPath;
+                    }
+                } catch {
+                    // Ignore malformed PATH entries.
+                }
+            }
+            return null;
         }
 #endif
 
@@ -173,6 +251,9 @@ namespace OpenUtau.Core {
                 }
                 try {
                     return new InferenceSession(model, getOnnxSessionOptions());
+                } catch (Exception e) when (runner == "CUDA") {
+                    Log.Error(e, "Failed to create ONNX CUDA session. Install CUDA 12.x and cuDNN 9.x, ensure their bin directories are on PATH, then restart OpenUtau.");
+                    throw;
                 } catch (Exception e) when (runner != "CPU") {
                     Log.Warning(e, "Failed to create ONNX session with {OnnxRunner}; falling back to CPU", runner);
                     return new InferenceSession(model);
@@ -196,6 +277,9 @@ namespace OpenUtau.Core {
                 }
                 try {
                     return new InferenceSession(modelPath, getOnnxSessionOptions());
+                } catch (Exception e) when (runner == "CUDA") {
+                    Log.Error(e, "Failed to create ONNX CUDA session. Install CUDA 12.x and cuDNN 9.x, ensure their bin directories are on PATH, then restart OpenUtau.");
+                    throw;
                 } catch (Exception e) when (runner != "CPU") {
                     Log.Warning(e, "Failed to create ONNX session with {OnnxRunner}; falling back to CPU", runner);
                     return new InferenceSession(modelPath);
