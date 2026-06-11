@@ -74,8 +74,8 @@ jobs:
         run: |
           $nugetRoot = Join-Path $env:USERPROFILE ".nuget\packages"
           $nativeDirs = @(
-            Join-Path $nugetRoot "microsoft.ml.onnxruntime.gpu.windows\$env:ORT_GPU_VERSION\runtimes\win-x64\native",
-            Join-Path $nugetRoot "microsoft.ml.onnxruntime.gpu\$env:ORT_GPU_VERSION\runtimes\win-x64\native"
+            "$nugetRoot\microsoft.ml.onnxruntime.gpu.windows\$env:ORT_GPU_VERSION\runtimes\win-x64\native",
+            "$nugetRoot\microsoft.ml.onnxruntime.gpu\$env:ORT_GPU_VERSION\runtimes\win-x64\native"
           )
 
           $copied = $false
