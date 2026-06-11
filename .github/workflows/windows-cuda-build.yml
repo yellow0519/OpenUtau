@@ -1,4 +1,5 @@
 name: Windows CUDA Build
+run-name: Windows CUDA Build @ ${{ github.sha }}
 
 on:
   workflow_dispatch:
