@@ -27,6 +27,7 @@ jobs:
       RUNTIME_IDENTIFIER: win-x64
       PUBLISH_DIR: ${{ github.workspace }}\artifacts\OpenUtau-win-x64-cuda
       ZIP_PATH: ${{ github.workspace }}\artifacts\OpenUtau-win-x64-cuda.zip
+      ORT_GPU_VERSION: 1.23.2
 
     steps:
       - name: Checkout
@@ -67,6 +68,30 @@ jobs:
             Write-Host "Copied $($plugin.FullName) to $env:PUBLISH_DIR"
           }
 
+      - name: Force-copy ONNX Runtime GPU native DLLs
+        shell: pwsh
+        run: |
+          $nugetRoot = Join-Path $env:USERPROFILE ".nuget\packages"
+          $nativeDirs = @(
+            Join-Path $nugetRoot "microsoft.ml.onnxruntime.gpu.windows\$env:ORT_GPU_VERSION\runtimes\win-x64\native",
+            Join-Path $nugetRoot "microsoft.ml.onnxruntime.gpu\$env:ORT_GPU_VERSION\runtimes\win-x64\native"
+          )
+
+          $copied = $false
+          foreach ($nativeDir in $nativeDirs) {
+            if (Test-Path $nativeDir) {
+              Write-Host "Copying ONNX Runtime native DLLs from $nativeDir"
+              Copy-Item -Path (Join-Path $nativeDir "*.dll") -Destination $env:PUBLISH_DIR -Force
+              $copied = $true
+            } else {
+              Write-Host "ONNX Runtime native directory not found: $nativeDir"
+            }
+          }
+
+          if (-not $copied) {
+            Write-Error "No ONNX Runtime GPU native directory was found in the NuGet cache."
+          }
+
       - name: Check ONNX Runtime CUDA files
         shell: pwsh
         run: |
@@ -81,7 +106,7 @@ jobs:
             if (Test-Path $path) {
               Write-Host "Found $file"
             } else {
-              Write-Warning "$file was not found in the publish directory. Build can still pass, but CUDA runtime loading may fail until this is resolved."
+              Write-Error "$file was not found in the publish directory. CUDA build artifact is incomplete."
             }
           }
 
@@ -103,8 +128,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OpenUtau-win-x64-cuda
-          path: |
-            artifacts/OpenUtau-win-x64-cuda.zip
-            artifacts/OpenUtau-win-x64-cuda/
+          path: artifacts/OpenUtau-win-x64-cuda.zip
           if-no-files-found: error
           retention-days: 14
